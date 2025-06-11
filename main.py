@@ -44,7 +44,6 @@ def get_db_connection():
     return mysql.connector.connect(**DB_CONFIG)
 
 async def check_price_drops(app):
-    print("check_price_drops...")
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
@@ -53,10 +52,8 @@ async def check_price_drops(app):
         WHERE is_pending = FALSE
     ''')
     active_urls = cursor.fetchall()
-    print(active_urls)
 
     for row in active_urls:
-        print(row)
         user_id = row['user_id']
         url = row['url']
         old_price = row['price']
@@ -167,16 +164,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if vendor == 'amazon':
             product_name, price = price_getter.get_amazon_price(url)
-        if vendor == 'flipkart':
+        elif vendor == 'flipkart':
             product_name, price = price_getter.get_flipkart_price(url)
-        if vendor == 'myntra':
+        elif vendor == 'myntra':
             product_name, price = price_getter.get_myntra_price(url)
 
-        is_out_of_stock = False
-        if price and "out of stock" in price.lower() or "currently unavailable" in price.lower():
-            is_out_of_stock = True
+        print(product_name, price)
 
-        print(product_name, price, url, vendor)
+        is_out_of_stock = False
+        if price==None:
+            await update.message.reply_text("*Unable to fetch the price. Please try again...*", parse_mode="Markdown")
+            return
+
+        elif price and ("out of stock" in price.lower() or "currently unavailable" in price.lower()):
+            is_out_of_stock = True
 
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -300,7 +301,7 @@ def run_price_checker(app):
     async def periodic_price_check():
         while True:
             await check_price_drops(app)
-            await asyncio.sleep(1 *60)
+            await asyncio.sleep(10 *60)
 
     # Each thread needs its own event loop
     asyncio.run(periodic_price_check())

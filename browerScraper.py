@@ -41,7 +41,7 @@ class price_getter:
 
     def __try_find_text(self, xpath):
         try:
-            return self.driver.find_element(by=By.XPATH, value=xpath).text.strip()
+            return self.driver.find_element(by=By.XPATH, value=xpath).text.replace("*", "").strip()
         except:
             return None
 
