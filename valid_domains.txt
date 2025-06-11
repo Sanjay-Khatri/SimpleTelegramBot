@@ -1,8 +1,8 @@
-amazon.in
-amzn.to
-amzn.in
-flipkart.com
-myntra.com
-ajio.com
-tatacliq.com
-croma.com
+amazon.in,amazon
+amzn.to,amazon
+amzn.in,amazon
+flipkart.com,flipkart
+myntra.com,myntra
+ajio.com,ajio
+tatacliq.com,tatacliq
+croma.com,croma

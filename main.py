@@ -6,9 +6,9 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters
 )
 from scraper import fetch_product_info
+import browerScraper
 import asyncio
 import threading
-import time
 
 DB_CONFIG = {
     'host': '127.0.0.1',
@@ -19,19 +19,24 @@ DB_CONFIG = {
 }
 
 def load_valid_domains(filename="valid_domains.txt"):
+    domain_vendor_map = {}
     with open(filename, "r") as f:
-        domains = [line.strip() for line in f if line.strip()]
-    return domains
+        for line in f:
+            line = line.strip()
+            if line:
+                domain, vendor = line.split(",", 1)
+                domain_vendor_map[domain.strip()] = vendor.strip()
+    return domain_vendor_map
 
-def extract_valid_urls(text, valid_domains):
+def extract_valid_urls(text, domain_vendor_map):
     url_regex = re.compile(r'https?://[^\s]+')
     urls = re.findall(url_regex, text)
 
     valid_urls = []
     for url in urls:
-        for domain in valid_domains:
+        for domain, vendor in domain_vendor_map.items():
             if domain in url:
-                valid_urls.append(url)
+                valid_urls.append((url, vendor))
                 break
     return valid_urls
 
@@ -48,22 +53,38 @@ async def check_price_drops(app):
         WHERE is_pending = FALSE
     ''')
     active_urls = cursor.fetchall()
+    print(active_urls)
 
     for row in active_urls:
+        print(row)
         user_id = row['user_id']
         url = row['url']
         old_price = row['price']
         url_id = row['id']
         product_name = row['product_name']
+        vendor = row['vendor']
+        curr_notification_count = row['curr_notification_count']
 
-        new_name, new_price = fetch_product_info(url)
+        new_name = None
+        new_price = None
 
-        if new_price < old_price:
+        if vendor=='amazon':
+             new_name, new_price = price_getter.get_amazon_price(url)
+        if vendor=='flipkart':
+            new_name, new_price = price_getter.get_flipkart_price(url)
+        if vendor=='myntra':
+            new_name, new_price = price_getter.get_myntra_price(url)
+
+
+        if new_price==None or (new_price and ("out of stock" in new_price.lower() or "currently unavailable" in new_price.lower())):
+            continue
+
+        elif float(new_price) < old_price:
             try:
                 # Send message to user
                 keyboard = [
                     [
-                        InlineKeyboardButton("✅ Update Price", callback_data=f"update_price_{url_id}_{new_price}"),
+                        InlineKeyboardButton("✅ Update Price", callback_data=f"updateprice_{url_id}_{new_price}"),
                         InlineKeyboardButton("❌ Deactivate", callback_data=f"untrack_{url_id}")
                     ]
                 ]
@@ -71,9 +92,9 @@ async def check_price_drops(app):
 
                 await app.bot.send_message(
                     chat_id=user_id,
-                    text=f"📉 *{product_name}* has dropped in price!\n"
-                         f"💰 Old Price: ₹{old_price:.2f}\n"
-                         f"🆕 Current Price: ₹{new_price:.2f}",
+                    text=f"📉 *{product_name}* has dropped in price!\n\n"
+                         f"💰 Old Price: ₹{old_price}\n\n"
+                         f"🆕 *Current Price: ₹{new_price}*",
                     parse_mode="Markdown",
                     reply_markup=reply_markup,
                     disable_web_page_preview=True
@@ -83,10 +104,20 @@ async def check_price_drops(app):
                 cursor.execute('''
                     UPDATE urls
                     SET notification_count = notification_count + 1,
+                        curr_notification_count = curr_notification_count + 1,
                         last_notified_price = %s
                     WHERE id = %s
                 ''', (new_price, url_id))
                 conn.commit()
+
+                if curr_notification_count+1 >= 3:
+                    # Update curr_notification_count & price
+                    cursor.execute('''
+                                        UPDATE urls
+                                        SET curr_notification_count = 0, price = %s
+                                        WHERE id = %s
+                                    ''', (new_price, url_id))
+                    conn.commit()
 
             except Exception as e:
                 print(f"Failed to notify user {user_id} for {url}: {e}")
@@ -114,34 +145,54 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("👋 Hello! Send a product link to track.")
 
+
+price_getter = browerScraper.price_getter()
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
     VALID_DOMAINS = load_valid_domains()
     text = update.message.text.strip()
-    valid_urls = extract_valid_urls(text, VALID_DOMAINS)
+    url_vendor_pairs  = extract_valid_urls(text, VALID_DOMAINS)
 
-    if not valid_urls:
+    if not url_vendor_pairs :
         await update.message.reply_text("⚠️ Invalid link. Please send a product URL from Flipkart, Amazon, etc.")
         return
 
-    for url in valid_urls:
-        product_name, price = fetch_product_info(url)
+    for url, vendor in url_vendor_pairs:
+
+        product_name = None
+        price = None
+
+        if vendor == 'amazon':
+            product_name, price = price_getter.get_amazon_price(url)
+        if vendor == 'flipkart':
+            product_name, price = price_getter.get_flipkart_price(url)
+        if vendor == 'myntra':
+            product_name, price = price_getter.get_myntra_price(url)
+
+        is_out_of_stock = False
+        if price and "out of stock" in price.lower() or "currently unavailable" in price.lower():
+            is_out_of_stock = True
+
+        print(product_name, price, url, vendor)
 
         conn = get_db_connection()
         cursor = conn.cursor()
 
         cursor.execute('''
-            INSERT INTO urls (user_id, url, product_name, price, is_pending, notification_count)
-            VALUES (%s, %s, %s, %s, TRUE, 0)
-        ''', (user.id, url, product_name, price))
+            INSERT INTO urls 
+            (user_id, url, product_name, price, vendor, is_pending, notification_count, last_notified_price, is_out_of_stock)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ''', (user.id, url, product_name, price, vendor, True, 0, price, is_out_of_stock))
         url_id = cursor.lastrowid
         conn.commit()
         cursor.close()
         conn.close()
 
         await update.message.reply_text(
-            f"🛍️ *{product_name}*\n💰 Price: ₹{price:.2f}",
+            f"🛍️ *{product_name}*\n💰 Price: ₹ {price}",
             parse_mode="Markdown",
             disable_web_page_preview=True
         )
@@ -152,8 +203,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text("Do you want me to track this product?", reply_markup=reply_markup)
-    # else:
-    #     await update.message.reply_text("⚠️ Invalid link. Please send a product URL from Flipkart, Amazon, etc.")
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -198,14 +247,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🛑 Tracking turned off.")
 
     elif data.startswith('updateprice_'):
-        product_name, current_price = fetch_product_info_from_db(cursor, url_id)
-        cursor.execute('''
-            UPDATE urls SET price = %s
-            WHERE id = %s AND user_id = %s
-        ''', (current_price, url_id, user.id))
-        await query.edit_message_text(f"🔄 Price updated to ₹{current_price:.2f}.")
-
-    elif data.startswith('update_price_'):
         _, url_id, new_price = data.split('_')
         url_id = int(url_id)
         new_price = float(new_price)
@@ -213,7 +254,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute('''
             UPDATE urls SET price = %s WHERE id = %s AND user_id = %s
         ''', (new_price, url_id, user.id))
-        await query.edit_message_text(f"✅ Price updated to ₹{new_price:.2f}")
+        await query.edit_message_text(f"✅ Price updated to ₹{new_price}")
 
     conn.commit()
     cursor.close()
@@ -255,49 +296,11 @@ def fetch_product_info_from_db(cursor, url_id):
         return fetch_product_info(url)
     return "Unknown", 0.0
 
-async def check_price_drops(app):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute('''
-        SELECT id, user_id, url, product_name, price FROM urls
-        WHERE is_pending = FALSE
-    ''')
-    urls = cursor.fetchall()
-
-    for url_id, user_id, url, name, old_price in urls:
-        new_name, new_price = fetch_product_info(url)
-        if new_price < old_price:
-            cursor.execute('''
-                UPDATE urls SET notification_count = notification_count + 1
-                WHERE id = %s
-            ''', (url_id,))
-
-            keyboard = [
-                [InlineKeyboardButton("🔄 Update Price", callback_data=f"updateprice_{url_id}"),
-                 InlineKeyboardButton("🛑 Deactivate", callback_data=f"untrack_{url_id}")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            try:
-                await app.bot.send_message(
-                    chat_id=user_id,
-                    text=f"📉 Price Drop Alert!\n🛒 *{new_name}*\n💰 Now: ₹{new_price:.2f}",
-                    parse_mode="Markdown",
-                    reply_markup=reply_markup,
-                    disable_web_page_preview=True
-                )
-            except Exception as e:
-                print(f"Failed to notify user {user_id}: {e}")
-
-    conn.commit()
-    cursor.close()
-    conn.close()
-
 def run_price_checker(app):
     async def periodic_price_check():
         while True:
             await check_price_drops(app)
-            await asyncio.sleep(3600)
+            await asyncio.sleep(1 *60)
 
     # Each thread needs its own event loop
     asyncio.run(periodic_price_check())
