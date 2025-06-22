@@ -71,6 +71,8 @@ async def check_price_drops(app):
             new_name, new_price = price_getter.get_flipkart_price(url)
         if vendor=='myntra':
             new_name, new_price = price_getter.get_myntra_price(url)
+        if vendor=='hmt':
+            new_name, new_price = price_getter.get_hmt_price(url)
 
 
         if new_price==None or (new_price and ("out of stock" in new_price.lower() or "currently unavailable" in new_price.lower())):
@@ -91,7 +93,8 @@ async def check_price_drops(app):
                     chat_id=user_id,
                     text=f"📉 *{product_name}* has dropped in price!\n\n"
                          f"💰 Old Price: ₹{old_price}\n\n"
-                         f"🆕 *Current Price: ₹{new_price}*",
+                         f"🆕 *Current Price: ₹{new_price}*\n\n"
+                         f"🆕 *{url}*",
                     parse_mode="Markdown",
                     reply_markup=reply_markup,
                     disable_web_page_preview=True
@@ -168,6 +171,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             product_name, price = price_getter.get_flipkart_price(url)
         elif vendor == 'myntra':
             product_name, price = price_getter.get_myntra_price(url)
+        elif vendor == 'hmt':
+            product_name, price = price_getter.get_hmt_price(url)
 
         print(product_name, price)
 

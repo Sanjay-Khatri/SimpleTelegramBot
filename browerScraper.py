@@ -55,6 +55,9 @@ class price_getter:
     def __clean_price(self, price_str):
         return price_str.replace("\n", ".").replace("₹", "").replace(",", "").strip()
 
+    def __clean_hmt_price(self, price_str):
+        return price_str.lower().replace("\n", ".").replace("mrp", "").replace("₹", "").replace(",", "").strip()
+
     def get_amazon_price(self, url, wait=False):
         self.lock.acquire()
         try:
@@ -146,6 +149,34 @@ class price_getter:
                 return title, self.__clean_price(price)
 
             print("MYNTRA: FINALLY RETURNING...", url)
+            return title, None
+
+        finally:
+            self.__newTab()
+            self.lock.release()
+
+    def get_hmt_price(self, url):
+        self.lock.acquire()
+        try:
+            if not self.__safe_get(url):
+                self.__newTab()
+                return None, None
+
+            title = self.__try_find_text("//*[@class='product-title']")
+
+            if not title:
+                self.__newTab()
+                return None, None
+
+            out_of_stock = "//*[@class='vote text-danger']"
+            if self.__check_element_exists(out_of_stock):
+                return title, "Out of Stock"
+
+            price = self.__try_find_text("//*[@class='price discountPrice']")
+            if price:
+                return title, self.__clean_hmt_price(price)
+
+            print("HMT: FINALLY RETURNING...", url)
             return title, None
 
         finally:

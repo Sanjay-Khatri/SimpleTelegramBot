@@ -6,3 +6,4 @@ myntra.com,myntra
 ajio.com,ajio
 tatacliq.com,tatacliq
 croma.com,croma
+hmtwatches.in,hmt
