@@ -9,13 +9,25 @@ class price_getter:
     def __init__(self, name=None, timeout_limit=50):
         self.lock = threading.Lock()
         options = ChromeOptions()
-        # options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        # options.add_experimental_option("excludeSwitches", ["enable-logging"])
+        # ✅ Enable headless mode
+        options.add_argument("--headless=new")
+        # Recommended flags for stability
+        options.add_argument("--disable-gpu")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("excludeSwitches", ["enable-logging"])
         # options.add_argument('--proxy-server=%s' % selected_proxy)
         # capabilities = options.to_capabilities()
         # capabilities['pageLoadStrategy'] = "eager"
+
+        # Page load strategy
+        options.page_load_strategy = "eager"
+
         self.driver = webdriver.Chrome(options=options)
-        # self.driver.set_page_load_timeout(timeout_limit)
+        self.driver.set_page_load_timeout(timeout_limit)
         # self.driver.maximize_window()
         print("HEADLESS BEGINS FOR...{}....Timeout={}".format(name, timeout_limit))
 
