@@ -27,8 +27,6 @@ class price_getter:
         options.page_load_strategy = "eager"
 
         self.driver = webdriver.Chrome(options=options)
-        self.driver.set_page_load_timeout(timeout_limit)
-        # self.driver.maximize_window()
         print("HEADLESS BEGINS FOR...{}....Timeout={}".format(name, timeout_limit))
 
     def destroy(self):

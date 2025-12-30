@@ -11,8 +11,8 @@ import asyncio
 import threading
 
 DB_CONFIG = {
-    'host': '127.0.0.1',
-    'port': 3306,
+    'host': '0.tcp.in.ngrok.io',
+    'port': 18049,
     'user': 'root',
     'password': '',  # Add your MySQL password here
     'database': 'basic_telegram_bot'
