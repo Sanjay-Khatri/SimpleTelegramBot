@@ -1,4 +1,4 @@
-import re
+import re, logging
 import mysql.connector
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -11,8 +11,8 @@ import asyncio
 import threading
 
 DB_CONFIG = {
-    'host': '0.tcp.in.ngrok.io',
-    'port': 18049,
+    'host': 'localhost',
+    'port': 3306,
     'user': 'root',
     'password': '',  # Add your MySQL password here
     'database': 'basic_telegram_bot'
@@ -61,6 +61,7 @@ async def check_price_drops(app):
         product_name = row['product_name']
         vendor = row['vendor']
         curr_notification_count = row['curr_notification_count']
+        pid = row['product_id']
 
         new_name = None
         new_price = None
@@ -68,7 +69,7 @@ async def check_price_drops(app):
         if vendor=='amazon':
              new_name, new_price = price_getter.get_amazon_price(url)
         if vendor=='flipkart':
-            new_name, new_price = price_getter.get_flipkart_price(url)
+            new_name, new_price, pid = price_getter.get_flipkart_price(url, pid)
         if vendor=='myntra':
             new_name, new_price = price_getter.get_myntra_price(url)
         if vendor=='hmt':
@@ -154,7 +155,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     VALID_DOMAINS = load_valid_domains()
     text = update.message.text.strip()
+    print("RECIEVED TEXT :: ", text)
     url_vendor_pairs  = extract_valid_urls(text, VALID_DOMAINS)
+    print("VENDOR :: ", url_vendor_pairs)
 
     if not url_vendor_pairs :
         await update.message.reply_text("⚠️ Invalid link. Please send a product URL from Flipkart, Amazon, etc.")
@@ -164,11 +167,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         product_name = None
         price = None
+        pid = None
 
         if vendor == 'amazon':
             product_name, price = price_getter.get_amazon_price(url)
         elif vendor == 'flipkart':
-            product_name, price = price_getter.get_flipkart_price(url)
+            product_name, price, pid = price_getter.get_flipkart_price(url)
         elif vendor == 'myntra':
             product_name, price = price_getter.get_myntra_price(url)
         elif vendor == 'hmt':
@@ -189,9 +193,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         cursor.execute('''
             INSERT INTO urls 
-            (user_id, url, product_name, price, vendor, is_pending, notification_count, last_notified_price, is_out_of_stock)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ''', (user.id, url, product_name, price, vendor, True, 0, price, is_out_of_stock))
+            (user_id, url, product_name, price, vendor, is_pending, notification_count, last_notified_price, is_out_of_stock, product_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ''', (user.id, url, product_name, price, vendor, True, 0, price, is_out_of_stock, pid))
         url_id = cursor.lastrowid
         conn.commit()
         cursor.close()

@@ -1,7 +1,8 @@
-import threading
+import threading, requests, json, time
 from selenium import webdriver
 from selenium.webdriver import ChromeOptions
 from selenium.webdriver.common.by import By
+from urllib.parse import urlparse, parse_qs
 
 
 class price_getter:
@@ -26,7 +27,8 @@ class price_getter:
         # Page load strategy
         options.page_load_strategy = "eager"
 
-        self.driver = webdriver.Chrome(options=options)
+        # self.driver = webdriver.Chrome(options=options)
+        self.driver = webdriver.Chrome()
         print("HEADLESS BEGINS FOR...{}....Timeout={}".format(name, timeout_limit))
 
     def destroy(self):
@@ -107,28 +109,52 @@ class price_getter:
             self.__newTab()
             self.lock.release()
 
-    def get_flipkart_price(self, url):
+    def get_flipkart_price(self, url, pid_from_url=None):
         self.lock.acquire()
         try:
-            if not self.__safe_get(url):
-                self.__newTab()
-                return None, None
+            pid_from_url = None
+            if not pid_from_url:
+                print("GETTING FULL URL FROM BROWSER FOR :: ", url)
+                self.__safe_get(url)
+                time.sleep(5)
+                current_url = self.driver.current_url
+                print("EXPANDED FLIPKART URL ::", current_url)
+                pid_from_url = self.extract_pid_from_url(current_url)
+                print("PID :: ", pid_from_url)
+            response = self.fetch_flipkart_price_api(pid_from_url)
+            print("FLIPKART API RESPONSE :: ", response)
+            if response.get('error'):
+                return None, None, None
+            else:
 
-            title = self.__try_find_text("//h1[@class='_6EBuvT']")
-            if not title:
-                self.__newTab()
-                return None, None
+                title = response.get("title") or ""
+                subtitle = response.get("subtitle") or ""
 
-            out_of_stock_xpath = "//button[contains(@class, 'QqFHMw') and contains(@class, 'vslbG+') and contains(@class, 'In9uk2') and not(@disabled)]"
-            if not self.__check_element_exists(out_of_stock_xpath):
-                return title, "Out of Stock"
+                if response.get('availability') == False:
+                    return f"{title} {subtitle}" if subtitle else title, "Out of Stock", pid_from_url
 
-            price = self.__try_find_text("//div[@class='Nx9bqj CxhGGd']")
-            if price:
-                return title, self.__clean_price(price)
+                else:
+                    return f"{title} {subtitle}" if subtitle else title, response.get('final_price'), pid_from_url
 
-            print("FLIPKART: FINALLY RETURNING...", url)
-            return title, None
+            # if not self.__safe_get(url):
+            #     self.__newTab()
+            #     return None, None
+            #
+            # title = self.__try_find_text("//h1[@class='_6EBuvT']")
+            # if not title:
+            #     self.__newTab()
+            #     return None, None
+            #
+            # out_of_stock_xpath = "//button[contains(@class, 'QqFHMw') and contains(@class, 'vslbG+') and contains(@class, 'In9uk2') and not(@disabled)]"
+            # if not self.__check_element_exists(out_of_stock_xpath):
+            #     return title, "Out of Stock"
+            #
+            # price = self.__try_find_text("//div[@class='Nx9bqj CxhGGd']")
+            # if price:
+            #     return title, self.__clean_price(price)
+            #
+            # print("FLIPKART: FINALLY RETURNING...", url)
+            # return title, None
 
         finally:
             self.__newTab()
@@ -137,6 +163,8 @@ class price_getter:
     def get_myntra_price(self, url):
         self.lock.acquire()
         try:
+            self.__safe_get(url)
+
             if not self.__safe_get(url):
                 self.__newTab()
                 return None, None
@@ -192,6 +220,54 @@ class price_getter:
         finally:
             self.__newTab()
             self.lock.release()
+
+    def extract_pid_from_url(self, url: str):
+        try:
+            parsed_url = urlparse(url)
+            query_params = parse_qs(parsed_url.query)
+            return query_params.get("pid", [None])[0]
+        except Exception:
+            return None
+
+    def fetch_flipkart_price_api(self, pid):
+        url = "https://2.rome.api.flipkart.com/api/4/page/fetch?cacheFirst=false"
+
+        headers = {
+            "x-user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/143.0.0.0 Safari/537.36 FKUA/website/42/website/Desktop",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "pageUri": "/a/p/b?pid="+pid+"&marketplace=FLIPKART"
+        }
+
+        try:
+            response = requests.post(url, headers=headers, json=payload)
+            if response:
+                return self.__extract_product_info(response.json())
+        except requests.exceptions.RequestException as e:
+            return {"error": "Request Failed"}
+
+
+    def __extract_product_info(self, response_json: dict) -> dict:
+        try:
+            page_context = response_json["RESPONSE"]["pageData"]["pageContext"]
+
+            product_info = {
+                "product_id": page_context.get("productId"),
+                "title": page_context.get("titles", {}).get("title"),
+                "subtitle": page_context.get("titles", {}).get("subtitle"),
+                "brand": page_context.get("brand"),
+                "final_price": str(page_context.get("pricing", {}).get("finalPrice", {}).get("value")),
+                "availability": page_context.get("trackingDataV2", {}).get("serviceable"),
+            }
+
+            return product_info
+
+        except KeyError:
+            return {"error": "Invalid response structure"}
 
 
 # p = price_getter()
