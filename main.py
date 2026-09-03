@@ -1,4 +1,5 @@
-import re, logging
+import re
+import logging
 import mysql.connector
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -8,7 +9,13 @@ from telegram.ext import (
 from scraper import fetch_product_info
 import browerScraper
 import asyncio
-import threading
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logging.getLogger("httpx").setLevel(logging.ERROR)
+logger = logging.getLogger(__name__)
 
 DB_CONFIG = {
     'host': 'localhost',
@@ -67,13 +74,13 @@ async def check_price_drops(app):
         new_price = None
 
         if vendor=='amazon':
-             new_name, new_price = price_getter.get_amazon_price(url)
+             new_name, new_price = await price_getter.get_amazon_price(url)
         if vendor=='flipkart':
-            new_name, new_price, pid = price_getter.get_flipkart_price(url, pid)
+            new_name, new_price, pid = await price_getter.get_flipkart_price(url, pid)
         if vendor=='myntra':
-            new_name, new_price = price_getter.get_myntra_price(url)
+            new_name, new_price = await price_getter.get_myntra_price(url)
         if vendor=='hmt':
-            new_name, new_price = price_getter.get_hmt_price(url)
+            new_name, new_price = await price_getter.get_hmt_price(url)
 
 
         if new_price==None or (new_price and ("out of stock" in new_price.lower() or "currently unavailable" in new_price.lower())):
@@ -147,7 +154,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Hello! Send a product link to track.")
 
 
-price_getter = browerScraper.price_getter()
+price_getter = browerScraper.price_getter(headless=False)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -170,13 +177,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pid = None
 
         if vendor == 'amazon':
-            product_name, price = price_getter.get_amazon_price(url)
+            product_name, price = await price_getter.get_amazon_price(url)
         elif vendor == 'flipkart':
-            product_name, price, pid = price_getter.get_flipkart_price(url)
+            product_name, price, pid = await price_getter.get_flipkart_price(url)
         elif vendor == 'myntra':
-            product_name, price = price_getter.get_myntra_price(url)
+            product_name, price = await price_getter.get_myntra_price(url)
         elif vendor == 'hmt':
-            product_name, price = price_getter.get_hmt_price(url)
+            product_name, price = await price_getter.get_hmt_price(url)
 
         print(product_name, price)
 
@@ -306,27 +313,42 @@ def fetch_product_info_from_db(cursor, url_id):
         return fetch_product_info(url)
     return "Unknown", 0.0
 
-def run_price_checker(app):
-    async def periodic_price_check():
-        while True:
+async def periodic_price_check(app):
+    while True:
+        try:
             await check_price_drops(app)
-            await asyncio.sleep(10 *60)
+        except Exception:
+            logger.exception("Price checker error")
+        await asyncio.sleep(10 * 60)
 
-    # Each thread needs its own event loop
-    asyncio.run(periodic_price_check())
+async def post_init(app):
+    await price_getter.start()
+    app.bot_data["price_checker_task"] = asyncio.create_task(periodic_price_check(app))
+
+async def post_shutdown(app):
+    task = app.bot_data.get("price_checker_task")
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    await price_getter.destroy()
 
 def main():
     TOKEN = "1065793060:AAHAN4-svYeyI55Sgh1sm0auImeH7dxUZW8"
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_tracked))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
-
-    # Start the background thread for price check
-    t = threading.Thread(target=run_price_checker, args=(app,), daemon=True)
-    t.start()
 
     print("🤖 Bot is running...")
     app.run_polling()

@@ -1,225 +1,625 @@
-import threading, requests, json, time
-from selenium import webdriver
-from selenium.webdriver import ChromeOptions
-from selenium.webdriver.common.by import By
+import asyncio
+import requests, re, json
 from urllib.parse import urlparse, parse_qs
+from playwright.async_api import async_playwright
 
 
 class price_getter:
+    def __init__(self, name=None, timeout_limit=50000, headless=False):
+        self.name = name
+        self.timeout_limit = timeout_limit
+        self.playwright = None
+        self.browser = None
+        self.lock = asyncio.Lock()
+        self.headless = headless
 
-    def __init__(self, name=None, timeout_limit=50):
-        self.lock = threading.Lock()
-        options = ChromeOptions()
-        # ✅ Enable headless mode
-        options.add_argument("--headless=new")
-        # Recommended flags for stability
-        options.add_argument("--disable-gpu")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-blink-features=AutomationControlled")
+    async def start(self):
+        if self.browser:
+            return
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch(
+            headless=self.headless,
+            args=[
+                "--disable-gpu",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+            ],
+        )
+        print(f"PLAYWRIGHT BEGINS FOR...{self.name}....Timeout={self.timeout_limit}.....HEADLESS={self.headless}")
 
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("excludeSwitches", ["enable-logging"])
-        # options.add_argument('--proxy-server=%s' % selected_proxy)
-        # capabilities = options.to_capabilities()
-        # capabilities['pageLoadStrategy'] = "eager"
-
-        # Page load strategy
-        options.page_load_strategy = "eager"
-
-        # self.driver = webdriver.Chrome(options=options)
-        self.driver = webdriver.Chrome()
-        print("HEADLESS BEGINS FOR...{}....Timeout={}".format(name, timeout_limit))
-
-    def destroy(self):
+    async def destroy(self):
         print("destroying browser....")
-        self.driver.close()
-        self.driver.quit()
+        if self.browser:
+            await self.browser.close()
+            self.browser = None
+        if self.playwright:
+            await self.playwright.stop()
+            self.playwright = None
 
-    def __newTab(self):
-        self.driver.execute_script("window.open()")
-        for window in self.driver.window_handles[:-1]:
-            self.driver.switch_to.window(window)
-            self.driver.close()
-        self.driver.switch_to.window(self.driver.window_handles[-1])
+    async def _new_page(self):
+        if not self.browser:
+            await self.start()
+        context = await self.browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+        )
+        page = await context.new_page()
+        page.set_default_timeout(self.timeout_limit)
+        return context, page
 
-    def __safe_get(self, url):
+    async def _safe_goto(self, page, url):
         try:
-            self.driver.get(url)
+            await page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_limit)
             return True
         except Exception as e:
             print("Navigation Error:", e)
             return False
 
-    def __try_find_text(self, xpath):
+    async def _try_find_text(self, page, selector):
         try:
-            return self.driver.find_element(by=By.XPATH, value=xpath).text.replace("*", "").strip()
-        except:
+            locator = page.locator(selector).first
+            if await locator.count() == 0:
+                return None
+            text = await locator.inner_text(timeout=self.timeout_limit)
+            return text.replace("*", "").strip()
+        except Exception:
             return None
 
-    def __check_element_exists(self, xpath):
+    async def _check_element_exists(self, page, selector):
         try:
-            self.driver.find_element(by=By.XPATH, value=xpath)
-            return True
-        except:
+            return await page.locator(selector).count() > 0
+        except Exception:
             return False
 
-    def __clean_price(self, price_str):
+    def _clean_price(self, price_str):
         return price_str.replace("\n", ".").replace("₹", "").replace(",", "").strip()
 
-    def __clean_hmt_price(self, price_str):
+    def _clean_hmt_price(self, price_str):
         return price_str.lower().replace("\n", ".").replace("mrp", "").replace("₹", "").replace(",", "").strip()
 
-    def get_amazon_price(self, url, wait=False):
-        self.lock.acquire()
-        try:
-            if not self.__safe_get(url):
-                self.__newTab()
-                return None, None
+    async def get_amazon_price(self, url, wait=False):
+        async with self.lock:
+            context, page = await self._new_page()
+            try:
+                if not await self._safe_goto(page, url):
+                    return None, None
 
-            title = self.__try_find_text("//span[@id='productTitle']")
-            if not title:
-                self.__newTab()
-                return None, None
+                title = await self._try_find_text(page, "#productTitle")
+                if not title:
+                    return None, None
 
-            price_xpaths = [
-                "//span[@id='priceblock_saleprice']",
-                "//span[@id='priceblock_dealprice']",
-                "//span[@id='priceblock_ourprice']",
-                "//span[@class='a-price a-text-price a-size-medium apexPriceToPay']",
-                "//span[@class='a-price aok-align-center priceToPay']",
-                "//span[@class='a-price aok-align-center reinventPricePriceToPayMargin priceToPay']",
-                "//span[contains(@class, 'priceToPay')]",
-                "//div[@id='soldByThirdParty']",
-                "//span[@id='price']"
-            ]
+                price_selectors = [
+                    "#priceblock_saleprice",
+                    "#priceblock_dealprice",
+                    "#priceblock_ourprice",
+                    ".a-price.a-text-price.a-size-medium.apexPriceToPay",
+                    ".a-price.aok-align-center.priceToPay",
+                    ".a-price.aok-align-center.reinventPricePriceToPayMargin.priceToPay",
+                    "[class*='priceToPay']",
+                    "#soldByThirdParty",
+                    "#price",
+                ]
+                for selector in price_selectors:
+                    price = await self._try_find_text(page, selector)
+                    if price:
+                        return title, self._clean_price(price)
 
-            for xpath in price_xpaths:
-                price = self.__try_find_text(xpath)
-                if price:
-                    return title, self.__clean_price(price)
+                if await self._check_element_exists(page, "text=Currently unavailable."):
+                    return title, "Currently Unavailable"
 
-            if self.__check_element_exists("//*[text()='Currently unavailable.']"):
+                print("AMAZON: FINALLY RETURNING...", url)
                 return title, "Currently Unavailable"
+            finally:
+                await context.close()
 
-            print("AMAZON: FINALLY RETURNING...", url)
-            return title, "Currently Unavailable"
+    async def get_flipkart_price(self, url, pid_from_url=None):
+        async with self.lock:
+            context = None
 
-        finally:
-            self.__newTab()
-            self.lock.release()
+            try:
+                context, page = await self._new_page()
+                print("GETTING FLIPKART PRODUCT ::", url)
 
-    def get_flipkart_price(self, url, pid_from_url=None):
-        self.lock.acquire()
-        try:
-            pid_from_url = None
-            if not pid_from_url:
-                print("GETTING FULL URL FROM BROWSER FOR :: ", url)
-                self.__safe_get(url)
-                time.sleep(5)
-                current_url = self.driver.current_url
-                print("EXPANDED FLIPKART URL ::", current_url)
-                pid_from_url = self.extract_pid_from_url(current_url)
-                print("PID :: ", pid_from_url)
-            response = self.fetch_flipkart_price_api(pid_from_url)
-            print("FLIPKART API RESPONSE :: ", response)
-            if response.get('error'):
-                return None, None, None
-            else:
+                if not await self._safe_goto(page, url):
+                    print("FLIPKART PAGE LOAD FAILED")
+                    return None, None, None
 
-                title = response.get("title") or ""
-                subtitle = response.get("subtitle") or ""
+                # Give React/Flipkart enough time to render the product section.
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
 
-                if response.get('availability') == False:
-                    return f"{title} {subtitle}" if subtitle else title, "Out of Stock", pid_from_url
+                await page.wait_for_timeout(2500)
 
-                else:
-                    return f"{title} {subtitle}" if subtitle else title, response.get('final_price'), pid_from_url
+                current_url = page.url
 
-            # if not self.__safe_get(url):
-            #     self.__newTab()
-            #     return None, None
-            #
-            # title = self.__try_find_text("//h1[@class='_6EBuvT']")
-            # if not title:
-            #     self.__newTab()
-            #     return None, None
-            #
-            # out_of_stock_xpath = "//button[contains(@class, 'QqFHMw') and contains(@class, 'vslbG+') and contains(@class, 'In9uk2') and not(@disabled)]"
-            # if not self.__check_element_exists(out_of_stock_xpath):
-            #     return title, "Out of Stock"
-            #
-            # price = self.__try_find_text("//div[@class='Nx9bqj CxhGGd']")
-            # if price:
-            #     return title, self.__clean_price(price)
-            #
-            # print("FLIPKART: FINALLY RETURNING...", url)
-            # return title, None
+                if not pid_from_url:
+                    pid_from_url = self.extract_pid_from_url(current_url)
 
-        finally:
-            self.__newTab()
-            self.lock.release()
+                # ---------------------------------------------------------
+                # TITLE
+                # ---------------------------------------------------------
+                title = None
 
-    def get_myntra_price(self, url):
-        self.lock.acquire()
-        try:
-            self.__safe_get(url)
+                title_selectors = [
+                    "h1",
+                    '[class*="VU-ZEz"]',
+                    '[class*="aA9eLq"]',
+                ]
 
-            if not self.__safe_get(url):
-                self.__newTab()
-                return None, None
+                for selector in title_selectors:
+                    try:
+                        locator = page.locator(selector).first
 
-            title_part1 = self.__try_find_text("//h1[@class='pdp-title']")
-            title_part2 = self.__try_find_text("//h1[contains(@class, 'pdp-name')]")
-            title = (title_part1 or "") + " " + (title_part2 or "")
-            title = title.strip()
+                        if await locator.count() and await locator.is_visible():
+                            text = (await locator.inner_text()).strip()
 
-            if not title:
-                self.__newTab()
-                return None, None
+                            if text and len(text) > 5:
+                                title = text
+                                break
 
-            add_to_bag_xpath = "//div[contains(text(), 'ADD TO BAG')]"
-            if not self.__check_element_exists(add_to_bag_xpath):
-                return title, "Out of Stock"
+                    except Exception as e:
+                        print(f"FLIPKART TITLE ERROR :: {selector} :: {e}")
 
-            price = self.__try_find_text("//span[@class='pdp-price']")
-            if price:
-                return title, self.__clean_price(price)
+                # ---------------------------------------------------------
+                # PRICE
+                # ---------------------------------------------------------
+                price = None
 
-            print("MYNTRA: FINALLY RETURNING...", url)
-            return title, None
+                # These are known/current Flipkart price patterns.
+                # Keep the generic class matching because Flipkart changes
+                # generated class names frequently.
+                price_selectors = [
+                    "div._30jeq3",
+                    "div.Nx9bqj",
+                    "div.CxhGGd",
+                    '[class*="_30jeq3"]',
+                    '[class*="Nx9bqj"]',
+                    '[class*="CxhGGd"]',
+                ]
 
-        finally:
-            self.__newTab()
-            self.lock.release()
+                def parse_price(text):
+                    """
+                    Extract a rupee price from a small product-price element.
+                    Avoid accepting obviously unrelated numbers.
+                    """
+                    if not text:
+                        return None
 
-    def get_hmt_price(self, url):
-        self.lock.acquire()
-        try:
-            if not self.__safe_get(url):
-                self.__newTab()
-                return None, None
+                    text = " ".join(text.split())
 
-            title = self.__try_find_text("//*[@class='product-title']")
+                    # Normal Flipkart price format:
+                    # ₹476
+                    # ₹ 476
+                    # ₹3,224
+                    matches = re.findall(r"₹\s*([0-9][0-9,]*)", text)
 
-            if not title:
-                self.__newTab()
-                return None, None
+                    for value in matches:
+                        try:
+                            value = int(value.replace(",", ""))
 
-            out_of_stock = "//*[@class='vote text-danger']"
-            if self.__check_element_exists(out_of_stock):
-                return title, "Out of Stock"
+                            # Reject clearly invalid values.
+                            if value >= 50:
+                                return value
 
-            price = self.__try_find_text("//*[@class='price discountPrice']")
-            if price:
-                return title, self.__clean_hmt_price(price)
+                        except (ValueError, TypeError):
+                            continue
 
-            print("HMT: FINALLY RETURNING...", url)
-            return title, None
+                    return None
 
-        finally:
-            self.__newTab()
-            self.lock.release()
+                # ---------------------------------------------------------
+                # 1. First try Flipkart's actual price elements
+                # ---------------------------------------------------------
+                for selector in price_selectors:
+                    try:
+                        locator = page.locator(selector)
+                        count = await locator.count()
+
+                        for i in range(count):
+                            element = locator.nth(i)
+
+                            try:
+                                if not await element.is_visible():
+                                    continue
+
+                                text = (await element.inner_text()).strip()
+
+                                if not text:
+                                    continue
+
+                                print(
+                                    f"FLIPKART PRICE CANDIDATE :: "
+                                    f"{selector} :: {text}"
+                                )
+
+                                candidate = parse_price(text)
+
+                                if candidate is not None:
+                                    price = candidate
+                                    break
+
+                            except Exception:
+                                continue
+
+                        if price is not None:
+                            break
+
+                    except Exception as e:
+                        print(
+                            f"FLIPKART PRICE SELECTOR ERROR :: "
+                            f"{selector} :: {e}"
+                        )
+
+                # ---------------------------------------------------------
+                # 2. Try JSON-LD structured product data
+                # ---------------------------------------------------------
+                #
+                # Flipkart can expose:
+                #
+                # Product
+                #   offers
+                #      price
+                #
+                # This is much safer than scanning the entire body.
+                # ---------------------------------------------------------
+                if price is None:
+                    try:
+                        scripts = await page.locator(
+                            'script[type="application/ld+json"]'
+                        ).all_inner_texts()
+
+                        for script_text in scripts:
+                            try:
+                                data = json.loads(script_text)
+
+                                objects = (
+                                    data
+                                    if isinstance(data, list)
+                                    else [data]
+                                )
+
+                                for obj in objects:
+                                    if not isinstance(obj, dict):
+                                        continue
+
+                                    if obj.get("@type") != "Product":
+                                        continue
+
+                                    offers = obj.get("offers")
+
+                                    if isinstance(offers, dict):
+                                        raw_price = offers.get("price")
+
+                                        if raw_price is not None:
+                                            candidate = int(
+                                                float(str(raw_price))
+                                            )
+
+                                            if candidate >= 50:
+                                                price = candidate
+                                                break
+
+                                    elif isinstance(offers, list):
+                                        for offer in offers:
+                                            if not isinstance(offer, dict):
+                                                continue
+
+                                            raw_price = offer.get("price")
+
+                                            if raw_price is None:
+                                                continue
+
+                                            candidate = int(
+                                                float(str(raw_price))
+                                            )
+
+                                            if candidate >= 50:
+                                                price = candidate
+                                                break
+
+                                    if price is not None:
+                                        break
+
+                            except Exception:
+                                continue
+
+                            if price is not None:
+                                break
+
+                    except Exception as e:
+                        print(
+                            "FLIPKART JSON-LD PRICE ERROR ::",
+                            e
+                        )
+
+                # ---------------------------------------------------------
+                # 3. Last-resort price extraction
+                # ---------------------------------------------------------
+                #
+                # IMPORTANT:
+                # Do NOT simply take the first ₹ value from body text.
+                #
+                # Flipkart pages can contain:
+                #
+                #   MRP
+                #   selling price
+                #   bank offer
+                #   lowest price
+                #   EMI
+                #   related products
+                #
+                # So only use a tightly scoped product-area fallback.
+                # ---------------------------------------------------------
+                if price is None:
+                    try:
+                        # Look around the main product area first.
+                        product_candidates = [
+                            "main",
+                            '[role="main"]',
+                            'div[data-id]',
+                        ]
+
+                        for selector in product_candidates:
+                            try:
+                                locator = page.locator(selector).first
+
+                                if not await locator.count():
+                                    continue
+
+                                if not await locator.is_visible():
+                                    continue
+
+                                text = await locator.inner_text()
+
+                                # Get all prices from this section.
+                                values = re.findall(
+                                    r"₹\s*([0-9][0-9,]*)",
+                                    text
+                                )
+
+                                parsed_values = []
+
+                                for value in values:
+                                    try:
+                                        candidate = int(
+                                            value.replace(",", "")
+                                        )
+
+                                        if candidate >= 50:
+                                            parsed_values.append(candidate)
+
+                                    except ValueError:
+                                        continue
+
+                                if parsed_values:
+                                    # Usually the selling price is the
+                                    # lowest of the first few product prices,
+                                    # but don't blindly use the entire page.
+                                    price = min(parsed_values[:5])
+                                    break
+
+                            except Exception:
+                                continue
+
+                    except Exception as e:
+                        print(
+                            "FLIPKART PRODUCT AREA PRICE ERROR ::",
+                            e
+                        )
+
+                # ---------------------------------------------------------
+                # AVAILABILITY
+                # ---------------------------------------------------------
+                #
+                # DO NOT use:
+                #
+                #   "if 'out of stock' in body"
+                #
+                # because Flipkart can show that text for another
+                # variant/section.
+                # ---------------------------------------------------------
+                availability = "UNKNOWN"
+
+                try:
+                    body_text = await page.locator("body").inner_text()
+                    normalized = " ".join(body_text.lower().split())
+
+                    # -----------------------------------------------------
+                    # Strong positive signals
+                    # -----------------------------------------------------
+                    buy_now = page.get_by_text(
+                        re.compile(r"^buy now$", re.I)
+                    )
+
+                    add_to_cart = page.get_by_text(
+                        re.compile(r"^add to cart$", re.I)
+                    )
+
+                    buy_visible = False
+                    cart_visible = False
+
+                    try:
+                        for i in range(await buy_now.count()):
+                            if await buy_now.nth(i).is_visible():
+                                buy_visible = True
+                                break
+                    except Exception:
+                        pass
+
+                    try:
+                        for i in range(await add_to_cart.count()):
+                            if await add_to_cart.nth(i).is_visible():
+                                cart_visible = True
+                                break
+                    except Exception:
+                        pass
+
+                    if buy_visible or cart_visible:
+                        availability = "IN_STOCK"
+
+                    else:
+                        # -------------------------------------------------
+                        # Strong negative signals
+                        # -------------------------------------------------
+                        #
+                        # Only inspect the product's main area rather than
+                        # the whole page.
+                        # -------------------------------------------------
+                        product_text = normalized
+
+                        try:
+                            main_locator = page.locator(
+                                'main, [role="main"]'
+                            ).first
+
+                            if await main_locator.count():
+                                if await main_locator.is_visible():
+                                    product_text = " ".join(
+                                        (
+                                            await main_locator.inner_text()
+                                        ).lower().split()
+                                    )
+                        except Exception:
+                            pass
+
+                        out_of_stock_patterns = [
+                            "currently out of stock",
+                            "out of stock",
+                            "sold out",
+                        ]
+
+                        if any(
+                                pattern in product_text
+                                for pattern in out_of_stock_patterns
+                        ):
+                            availability = "OUT_OF_STOCK"
+
+                        # -------------------------------------------------
+                        # No delivery / unavailable signals
+                        # -------------------------------------------------
+                        elif any(
+                                pattern in product_text
+                                for pattern in (
+                                        "not deliverable",
+                                        "currently unavailable",
+                                )
+                        ):
+                            availability = "OUT_OF_STOCK"
+
+                        # -------------------------------------------------
+                        # If we have a valid product price but no explicit
+                        # OOS message, treat it as available.
+                        #
+                        # This is useful because Flipkart sometimes renders
+                        # the purchase buttons dynamically.
+                        # -------------------------------------------------
+                        elif price is not None:
+                            availability = "IN_STOCK"
+
+                except Exception as e:
+                    print(
+                        "FLIPKART AVAILABILITY ERROR ::",
+                        e
+                    )
+
+                # ---------------------------------------------------------
+                # DEBUG
+                # ---------------------------------------------------------
+                print(
+                    f"FLIPKART TITLE :: {title}"
+                )
+                print(
+                    f"FLIPKART PRICE :: {price}"
+                )
+                print(
+                    f"FLIPKART AVAILABILITY :: {availability}"
+                )
+                print(
+                    f"FLIPKART PID :: {pid_from_url}"
+                )
+
+                # ---------------------------------------------------------
+                # RETURN
+                # ---------------------------------------------------------
+                if not title:
+                    return None, None, pid_from_url
+
+                if availability == "OUT_OF_STOCK":
+                    return title, "Out of Stock", pid_from_url
+
+                return (
+                    title,
+                    str(price) if price is not None else None,
+                    pid_from_url,
+                )
+
+            except Exception as e:
+                print(
+                    "FLIPKART SCRAPING ERROR ::",
+                    e
+                )
+                return None, None, pid_from_url
+
+            finally:
+                if context:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+
+    async def get_myntra_price(self, url):
+        async with self.lock:
+            context, page = await self._new_page()
+            try:
+                if not await self._safe_goto(page, url):
+                    return None, None
+
+                title_part1 = await self._try_find_text(page, "//h1[@class='pdp-title']")
+                title_part2 = await self._try_find_text(page, "//h1[contains(@class, 'pdp-name')]")
+                title = f"{title_part1 or ''} {title_part2 or ''}".strip()
+                if not title:
+                    return None, None
+
+                if not await self._check_element_exists(page, "text=ADD TO BAG"):
+                    return title, "Out of Stock"
+
+                price = await self._try_find_text(page, "//span[@class='pdp-price']")
+                if price:
+                    return title, self._clean_price(price)
+
+                print("MYNTRA: FINALLY RETURNING...", url)
+                return title, None
+            finally:
+                await context.close()
+
+    async def get_hmt_price(self, url):
+        async with self.lock:
+            context, page = await self._new_page()
+            try:
+                if not await self._safe_goto(page, url):
+                    return None, None
+
+                title = await self._try_find_text(page, ".product-title")
+                if not title:
+                    return None, None
+
+                if await self._check_element_exists(page, ".vote.text-danger"):
+                    return title, "Out of Stock"
+
+                price = await self._try_find_text(page, ".price.discountPrice")
+                if price:
+                    return title, self._clean_hmt_price(price)
+
+                print("HMT: FINALLY RETURNING...", url)
+                return title, None
+            finally:
+                await context.close()
 
     def extract_pid_from_url(self, url: str):
         try:
@@ -231,31 +631,22 @@ class price_getter:
 
     def fetch_flipkart_price_api(self, pid):
         url = "https://2.rome.api.flipkart.com/api/4/page/fetch?cacheFirst=false"
-
         headers = {
-            "x-user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/143.0.0.0 Safari/537.36 FKUA/website/42/website/Desktop",
-            "Content-Type": "application/json"
+            "x-user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 FKUA/website/42/website/Desktop",
+            "Content-Type": "application/json",
         }
-
-        payload = {
-            "pageUri": "/a/p/b?pid="+pid+"&marketplace=FLIPKART"
-        }
-
+        payload = {"pageUri": "/a/p/b?pid=" + pid + "&marketplace=FLIPKART"}
         try:
-            response = requests.post(url, headers=headers, json=payload)
-            if response:
-                return self.__extract_product_info(response.json())
-        except requests.exceptions.RequestException as e:
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            return self._extract_product_info(response.json())
+        except requests.exceptions.RequestException:
             return {"error": "Request Failed"}
 
-
-    def __extract_product_info(self, response_json: dict) -> dict:
+    def _extract_product_info(self, response_json: dict) -> dict:
         try:
             page_context = response_json["RESPONSE"]["pageData"]["pageContext"]
-
-            product_info = {
+            return {
                 "product_id": page_context.get("productId"),
                 "title": page_context.get("titles", {}).get("title"),
                 "subtitle": page_context.get("titles", {}).get("subtitle"),
@@ -263,26 +654,5 @@ class price_getter:
                 "final_price": str(page_context.get("pricing", {}).get("finalPrice", {}).get("value")),
                 "availability": page_context.get("trackingDataV2", {}).get("serviceable"),
             }
-
-            return product_info
-
-        except KeyError:
+        except (KeyError, TypeError):
             return {"error": "Invalid response structure"}
-
-
-# p = price_getter()
-# print(p.get_amazon_price("https://www.amazon.in/gp/aw/d/B0987BTSDV"))
-# print(p.get_amazon_price("https://www.amazon.in/Wayona-Custom-100W-Charger-Cable/dp/B0F29DWD7T"))
-# print(p.get_amazon_price("https://www.amazon.in/dp/B0CB83QY4L"))
-#
-# print(p.get_flipkart_price("https://www.flipkart.com/acedan-sneakers-women/p/itm6535e06627f77?pid=SHOHCFR5UGKUDJQF&lid=LSTSHOHCFR5UGKUDJQF4UB1DG&marketplace=FLIPKART&store=osp%2Fiko&srno=b_1_2&otracker=browse&fm=organic&iid=en_JLhM3VWMGQ1ZZA6ae1V6uCqjtnbzbO14cV3QzvMcsdhJYaMAkL6SvJGmKmM8W_LjzCaGfvMMatnr-8Uegvd8kA%3D%3D&ppt=hp&ppn=homepage&ssid=svikub416o0000001749441153034"))
-# print(p.get_flipkart_price("https://www.flipkart.com/nothing-phone-3a/p/itm8150b2c810f5b?pid=MOBH8G3P6UXPEFSZ"))
-# print(p.get_flipkart_price(("https://www.flipkart.com/leader-beast-26t-front-suspension-disc-brake-complete-accessories-26-t-inch-mountain-cycle/p/itm23f449164291b?pid=CCEGVZ9YFTAKRXMN&lid=LSTCCEGVZ9YFTAKRXMN900VVQ&marketplace=FLIPKART&store=abc%2Fulv%2Fixt%2Fi5v&srno=b_1_1&otracker=browse&fm=organic&iid=en_2XK2mGDOdRohDNgomAGmtdO4XDCAwCWN6uWgPIRAd6QHVSzY1evuSDIPvj_X_GjLD1oLBGa0aRVO5jrsG97O5PUFjCTyOHoHZs-Z5_PS_w0%3D&ppt=None&ppn=None&ssid=jon6n666cw0000001749441977312")))
-#
-# for myntra_url in ["https://www.myntra.com/socks/heelium/heelium-men-pack-of-3-blue-solid-anti-odour-ankle-length-socks/10598478/buy",
-#             "https://www.myntra.com/sunglasses/skechers/skechers-men-blue-rectangle-sunglasses-se6035-58-91x/10216815/buy",
-#             "https://www.myntra.com/sports-accessories/kookaburra/kookaburra-men-white-rh-blaze-100-batting-leg-guards/7157062/buy",
-#             "https://www.myntra.com/accessory-gift-set/evoq/evoq-men-rust--beige-cuff-bands/16167784/buy",
-#             "https://www.myntra.com/10841992"
-#         ]:
-#     print(p.get_myntra_price(myntra_url))
