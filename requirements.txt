@@ -1,4 +1,4 @@
-playwright
+selenium==4.37.0
 requests==2.32.5
 mysql-connector-python==9.5.0
 beautifulsoup4==4.14.3

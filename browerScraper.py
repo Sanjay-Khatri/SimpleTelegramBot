@@ -1,569 +1,288 @@
-import threading
-import requests
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+import threading, requests, json, time
+from selenium import webdriver
+from selenium.webdriver import ChromeOptions
+from selenium.webdriver.common.by import By
 from urllib.parse import urlparse, parse_qs
+
 
 class price_getter:
 
     def __init__(self, name=None, timeout_limit=50):
         self.lock = threading.Lock()
+        options = ChromeOptions()
+        # ✅ Enable headless mode
+        options.add_argument("--headless=new")
+        # Recommended flags for stability
+        options.add_argument("--disable-gpu")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-blink-features=AutomationControlled")
 
-        # Playwright timeout is in milliseconds
-        self.timeout_limit = timeout_limit * 1000
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("excludeSwitches", ["enable-logging"])
+        # options.add_argument('--proxy-server=%s' % selected_proxy)
+        # capabilities = options.to_capabilities()
+        # capabilities['pageLoadStrategy'] = "eager"
 
-        self.playwright = sync_playwright().start()
+        # Page load strategy
+        options.page_load_strategy = "eager"
 
-        self.browser = self.playwright.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-gpu",
-                "--no-sandbox",
-                "--disable-dev-shm-usage"
-            ]
-        )
-
-        self.context = self.browser.new_context(
-            viewport={
-                "width": 1920,
-                "height": 1080
-            },
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            )
-        )
-
-        self.context.set_default_timeout(self.timeout_limit)
-
-        print(
-            "PLAYWRIGHT HEADLESS BEGINS FOR...{}....Timeout={}".format(
-                name,
-                timeout_limit
-            )
-        )
+        # self.driver = webdriver.Chrome(options=options)
+        self.driver = webdriver.Chrome()
+        print("HEADLESS BEGINS FOR...{}....Timeout={}".format(name, timeout_limit))
 
     def destroy(self):
-        print("Destroying Playwright browser...")
+        print("destroying browser....")
+        self.driver.close()
+        self.driver.quit()
 
-        try:
-            self.context.close()
-        except Exception:
-            pass
+    def __newTab(self):
+        self.driver.execute_script("window.open()")
+        for window in self.driver.window_handles[:-1]:
+            self.driver.switch_to.window(window)
+            self.driver.close()
+        self.driver.switch_to.window(self.driver.window_handles[-1])
 
+    def __safe_get(self, url):
         try:
-            self.browser.close()
-        except Exception:
-            pass
-
-        try:
-            self.playwright.stop()
-        except Exception:
-            pass
-
-    def __safe_goto(self, page, url):
-        try:
-            page.goto(
-                url,
-                wait_until="domcontentloaded",
-                timeout=self.timeout_limit
-            )
+            self.driver.get(url)
             return True
-
-        except PlaywrightTimeoutError:
-            print("Navigation timeout:", url)
-            return False
-
         except Exception as e:
             print("Navigation Error:", e)
             return False
 
-    def __try_find_text(self, page, selector):
+    def __try_find_text(self, xpath):
         try:
-            locator = page.locator(selector).first
-
-            if locator.count() == 0:
-                return None
-
-            text = locator.inner_text(
-                timeout=self.timeout_limit
-            )
-
-            return text.replace("*", "").strip()
-
-        except Exception:
+            return self.driver.find_element(by=By.XPATH, value=xpath).text.replace("*", "").strip()
+        except:
             return None
 
-    def __check_element_exists(self, page, selector):
+    def __check_element_exists(self, xpath):
         try:
-            return page.locator(selector).count() > 0
-        except Exception:
+            self.driver.find_element(by=By.XPATH, value=xpath)
+            return True
+        except:
             return False
 
     def __clean_price(self, price_str):
-        return (
-            price_str
-            .replace("\n", ".")
-            .replace("₹", "")
-            .replace(",", "")
-            .strip()
-        )
+        return price_str.replace("\n", ".").replace("₹", "").replace(",", "").strip()
 
     def __clean_hmt_price(self, price_str):
-        return (
-            price_str
-            .lower()
-            .replace("\n", ".")
-            .replace("mrp", "")
-            .replace("₹", "")
-            .replace(",", "")
-            .strip()
-        )
-
-    # ---------------------------------------------------------
-    # AMAZON
-    # ---------------------------------------------------------
+        return price_str.lower().replace("\n", ".").replace("mrp", "").replace("₹", "").replace(",", "").strip()
 
     def get_amazon_price(self, url, wait=False):
-
-        with self.lock:
-
-            page = self.context.new_page()
-
-            try:
-
-                if not self.__safe_goto(page, url):
-                    return None, None
-
-                title = self.__try_find_text(
-                    page,
-                    "#productTitle"
-                )
-
-                if not title:
-                    return None, None
-
-                price_selectors = [
-                    "#priceblock_saleprice",
-                    "#priceblock_dealprice",
-                    "#priceblock_ourprice",
-                    ".a-price.a-text-price.a-size-medium.apexPriceToPay",
-                    ".a-price.aok-align-center.priceToPay",
-                    ".a-price.aok-align-center.reinventPricePriceToPayMargin.priceToPay",
-                    "[class*='priceToPay']",
-                    "#soldByThirdParty",
-                    "#price"
-                ]
-
-                for selector in price_selectors:
-
-                    price = self.__try_find_text(
-                        page,
-                        selector
-                    )
-
-                    if price:
-                        return title, self.__clean_price(price)
-
-                if self.__check_element_exists(
-                    page,
-                    "text=Currently unavailable."
-                ):
-                    return title, "Currently Unavailable"
-
-                print(
-                    "AMAZON: FINALLY RETURNING...",
-                    url
-                )
-
-                return title, "Currently Unavailable"
-
-            except Exception as e:
-
-                print(
-                    "Amazon scraping error:",
-                    e
-                )
-
+        self.lock.acquire()
+        try:
+            if not self.__safe_get(url):
+                self.__newTab()
                 return None, None
 
-            finally:
+            title = self.__try_find_text("//span[@id='productTitle']")
+            if not title:
+                self.__newTab()
+                return None, None
 
-                try:
-                    page.close()
-                except Exception:
-                    pass
+            price_xpaths = [
+                "//span[@id='priceblock_saleprice']",
+                "//span[@id='priceblock_dealprice']",
+                "//span[@id='priceblock_ourprice']",
+                "//span[@class='a-price a-text-price a-size-medium apexPriceToPay']",
+                "//span[@class='a-price aok-align-center priceToPay']",
+                "//span[@class='a-price aok-align-center reinventPricePriceToPayMargin priceToPay']",
+                "//span[contains(@class, 'priceToPay')]",
+                "//div[@id='soldByThirdParty']",
+                "//span[@id='price']"
+            ]
 
-    # ---------------------------------------------------------
-    # FLIPKART
-    # ---------------------------------------------------------
+            for xpath in price_xpaths:
+                price = self.__try_find_text(xpath)
+                if price:
+                    return title, self.__clean_price(price)
+
+            if self.__check_element_exists("//*[text()='Currently unavailable.']"):
+                return title, "Currently Unavailable"
+
+            print("AMAZON: FINALLY RETURNING...", url)
+            return title, "Currently Unavailable"
+
+        finally:
+            self.__newTab()
+            self.lock.release()
 
     def get_flipkart_price(self, url, pid_from_url=None):
-
-        with self.lock:
-
-            page = self.context.new_page()
-
-            try:
-
-                if not pid_from_url:
-
-                    print(
-                        "GETTING FULL URL FROM BROWSER FOR :: ",
-                        url
-                    )
-
-                    if not self.__safe_goto(page, url):
-                        return None, None, None
-
-                    current_url = page.url
-
-                    print(
-                        "EXPANDED FLIPKART URL ::",
-                        current_url
-                    )
-
-                    pid_from_url = self.extract_pid_from_url(
-                        current_url
-                    )
-
-                    print(
-                        "PID :: ",
-                        pid_from_url
-                    )
-
-                if not pid_from_url:
-                    return None, None, None
-
-                response = self.fetch_flipkart_price_api(
-                    pid_from_url
-                )
-
-                print(
-                    "FLIPKART API RESPONSE :: ",
-                    response
-                )
-
-                if not response or response.get("error"):
-                    return None, None, None
+        self.lock.acquire()
+        try:
+            pid_from_url = None
+            if not pid_from_url:
+                print("GETTING FULL URL FROM BROWSER FOR :: ", url)
+                self.__safe_get(url)
+                time.sleep(5)
+                current_url = self.driver.current_url
+                print("EXPANDED FLIPKART URL ::", current_url)
+                pid_from_url = self.extract_pid_from_url(current_url)
+                print("PID :: ", pid_from_url)
+            response = self.fetch_flipkart_price_api(pid_from_url)
+            print("FLIPKART API RESPONSE :: ", response)
+            if response.get('error'):
+                return None, None, None
+            else:
 
                 title = response.get("title") or ""
                 subtitle = response.get("subtitle") or ""
 
-                product_name = (
-                    f"{title} {subtitle}"
-                    if subtitle
-                    else title
-                )
+                if response.get('availability') == False:
+                    return f"{title} {subtitle}" if subtitle else title, "Out of Stock", pid_from_url
 
-                if response.get("availability") is False:
+                else:
+                    return f"{title} {subtitle}" if subtitle else title, response.get('final_price'), pid_from_url
 
-                    return (
-                        product_name,
-                        "Out of Stock",
-                        pid_from_url
-                    )
+            # if not self.__safe_get(url):
+            #     self.__newTab()
+            #     return None, None
+            #
+            # title = self.__try_find_text("//h1[@class='_6EBuvT']")
+            # if not title:
+            #     self.__newTab()
+            #     return None, None
+            #
+            # out_of_stock_xpath = "//button[contains(@class, 'QqFHMw') and contains(@class, 'vslbG+') and contains(@class, 'In9uk2') and not(@disabled)]"
+            # if not self.__check_element_exists(out_of_stock_xpath):
+            #     return title, "Out of Stock"
+            #
+            # price = self.__try_find_text("//div[@class='Nx9bqj CxhGGd']")
+            # if price:
+            #     return title, self.__clean_price(price)
+            #
+            # print("FLIPKART: FINALLY RETURNING...", url)
+            # return title, None
 
-                return (
-                    product_name,
-                    response.get("final_price"),
-                    pid_from_url
-                )
-
-            except Exception as e:
-
-                print(
-                    "Flipkart scraping error:",
-                    e
-                )
-
-                return None, None, None
-
-            finally:
-
-                try:
-                    page.close()
-                except Exception:
-                    pass
-
-    # ---------------------------------------------------------
-    # MYNTRA
-    # ---------------------------------------------------------
+        finally:
+            self.__newTab()
+            self.lock.release()
 
     def get_myntra_price(self, url):
+        self.lock.acquire()
+        try:
+            self.__safe_get(url)
 
-        with self.lock:
-
-            page = self.context.new_page()
-
-            try:
-
-                if not self.__safe_goto(page, url):
-                    return None, None
-
-                title_part1 = self.__try_find_text(
-                    page,
-                    "h1.pdp-title"
-                )
-
-                title_part2 = self.__try_find_text(
-                    page,
-                    "h1.pdp-name"
-                )
-
-                title = (
-                    (title_part1 or "")
-                    + " "
-                    + (title_part2 or "")
-                ).strip()
-
-                if not title:
-                    return None, None
-
-                add_to_bag_selector = (
-                    "div:has-text('ADD TO BAG')"
-                )
-
-                if not self.__check_element_exists(
-                    page,
-                    add_to_bag_selector
-                ):
-                    return title, "Out of Stock"
-
-                price = self.__try_find_text(
-                    page,
-                    "span.pdp-price"
-                )
-
-                if price:
-                    return (
-                        title,
-                        self.__clean_price(price)
-                    )
-
-                print(
-                    "MYNTRA: FINALLY RETURNING...",
-                    url
-                )
-
-                return title, None
-
-            except Exception as e:
-
-                print(
-                    "Myntra scraping error:",
-                    e
-                )
-
+            if not self.__safe_get(url):
+                self.__newTab()
                 return None, None
 
-            finally:
+            title_part1 = self.__try_find_text("//h1[@class='pdp-title']")
+            title_part2 = self.__try_find_text("//h1[contains(@class, 'pdp-name')]")
+            title = (title_part1 or "") + " " + (title_part2 or "")
+            title = title.strip()
 
-                try:
-                    page.close()
-                except Exception:
-                    pass
+            if not title:
+                self.__newTab()
+                return None, None
 
-    # ---------------------------------------------------------
-    # HMT
-    # ---------------------------------------------------------
+            add_to_bag_xpath = "//div[contains(text(), 'ADD TO BAG')]"
+            if not self.__check_element_exists(add_to_bag_xpath):
+                return title, "Out of Stock"
+
+            price = self.__try_find_text("//span[@class='pdp-price']")
+            if price:
+                return title, self.__clean_price(price)
+
+            print("MYNTRA: FINALLY RETURNING...", url)
+            return title, None
+
+        finally:
+            self.__newTab()
+            self.lock.release()
 
     def get_hmt_price(self, url):
-
-        with self.lock:
-
-            page = self.context.new_page()
-
-            try:
-
-                if not self.__safe_goto(page, url):
-                    return None, None
-
-                title = self.__try_find_text(
-                    page,
-                    ".product-title"
-                )
-
-                if not title:
-                    return None, None
-
-                out_of_stock_selector = (
-                    ".vote.text-danger"
-                )
-
-                if self.__check_element_exists(
-                    page,
-                    out_of_stock_selector
-                ):
-                    return title, "Out of Stock"
-
-                price = self.__try_find_text(
-                    page,
-                    ".price.discountPrice"
-                )
-
-                if price:
-                    return (
-                        title,
-                        self.__clean_hmt_price(price)
-                    )
-
-                print(
-                    "HMT: FINALLY RETURNING...",
-                    url
-                )
-
-                return title, None
-
-            except Exception as e:
-
-                print(
-                    "HMT scraping error:",
-                    e
-                )
-
+        self.lock.acquire()
+        try:
+            if not self.__safe_get(url):
+                self.__newTab()
                 return None, None
 
-            finally:
+            title = self.__try_find_text("//*[@class='product-title']")
 
-                try:
-                    page.close()
-                except Exception:
-                    pass
+            if not title:
+                self.__newTab()
+                return None, None
 
-    # ---------------------------------------------------------
-    # FLIPKART HELPERS
-    # ---------------------------------------------------------
+            out_of_stock = "//*[@class='vote text-danger']"
+            if self.__check_element_exists(out_of_stock):
+                return title, "Out of Stock"
+
+            price = self.__try_find_text("//*[@class='price discountPrice']")
+            if price:
+                return title, self.__clean_hmt_price(price)
+
+            print("HMT: FINALLY RETURNING...", url)
+            return title, None
+
+        finally:
+            self.__newTab()
+            self.lock.release()
 
     def extract_pid_from_url(self, url: str):
-
         try:
-
             parsed_url = urlparse(url)
-
-            query_params = parse_qs(
-                parsed_url.query
-            )
-
-            return query_params.get(
-                "pid",
-                [None]
-            )[0]
-
+            query_params = parse_qs(parsed_url.query)
+            return query_params.get("pid", [None])[0]
         except Exception:
-
             return None
 
     def fetch_flipkart_price_api(self, pid):
-
-        url = (
-            "https://2.rome.api.flipkart.com/"
-            "api/4/page/fetch?cacheFirst=false"
-        )
+        url = "https://2.rome.api.flipkart.com/api/4/page/fetch?cacheFirst=false"
 
         headers = {
-            "x-user-agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/143.0.0.0 Safari/537.36 "
-                "FKUA/website/42/website/Desktop"
-            ),
+            "x-user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/143.0.0.0 Safari/537.36 FKUA/website/42/website/Desktop",
             "Content-Type": "application/json"
         }
 
         payload = {
-            "pageUri": (
-                "/a/p/b?pid="
-                + pid
-                + "&marketplace=FLIPKART"
-            )
+            "pageUri": "/a/p/b?pid="+pid+"&marketplace=FLIPKART"
         }
 
         try:
-
-            response = requests.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=30
-            )
-
-            response.raise_for_status()
-
-            return self.__extract_product_info(
-                response.json()
-            )
-
+            response = requests.post(url, headers=headers, json=payload)
+            if response:
+                return self.__extract_product_info(response.json())
         except requests.exceptions.RequestException as e:
+            return {"error": "Request Failed"}
 
-            print(
-                "Flipkart API request failed:",
-                e
-            )
 
-            return {
-                "error": "Request Failed"
-            }
-
-    def __extract_product_info(
-        self,
-        response_json: dict
-    ) -> dict:
-
+    def __extract_product_info(self, response_json: dict) -> dict:
         try:
-
-            page_context = (
-                response_json["RESPONSE"]
-                ["pageData"]
-                ["pageContext"]
-            )
+            page_context = response_json["RESPONSE"]["pageData"]["pageContext"]
 
             product_info = {
-
-                "product_id":
-                    page_context.get("productId"),
-
-                "title":
-                    page_context
-                    .get("titles", {})
-                    .get("title"),
-
-                "subtitle":
-                    page_context
-                    .get("titles", {})
-                    .get("subtitle"),
-
-                "brand":
-                    page_context.get("brand"),
-
-                "final_price":
-                    str(
-                        page_context
-                        .get("pricing", {})
-                        .get(
-                            "finalPrice",
-                            {}
-                        )
-                        .get("value")
-                    ),
-
-                "availability":
-                    page_context
-                    .get(
-                        "trackingDataV2",
-                        {}
-                    )
-                    .get("serviceable")
+                "product_id": page_context.get("productId"),
+                "title": page_context.get("titles", {}).get("title"),
+                "subtitle": page_context.get("titles", {}).get("subtitle"),
+                "brand": page_context.get("brand"),
+                "final_price": str(page_context.get("pricing", {}).get("finalPrice", {}).get("value")),
+                "availability": page_context.get("trackingDataV2", {}).get("serviceable"),
             }
 
             return product_info
 
-        except (
-            KeyError,
-            TypeError
-        ):
+        except KeyError:
+            return {"error": "Invalid response structure"}
 
-            return {
-                "error":
-                    "Invalid response structure"
-            }
+
+# p = price_getter()
+# print(p.get_amazon_price("https://www.amazon.in/gp/aw/d/B0987BTSDV"))
+# print(p.get_amazon_price("https://www.amazon.in/Wayona-Custom-100W-Charger-Cable/dp/B0F29DWD7T"))
+# print(p.get_amazon_price("https://www.amazon.in/dp/B0CB83QY4L"))
+#
+# print(p.get_flipkart_price("https://www.flipkart.com/acedan-sneakers-women/p/itm6535e06627f77?pid=SHOHCFR5UGKUDJQF&lid=LSTSHOHCFR5UGKUDJQF4UB1DG&marketplace=FLIPKART&store=osp%2Fiko&srno=b_1_2&otracker=browse&fm=organic&iid=en_JLhM3VWMGQ1ZZA6ae1V6uCqjtnbzbO14cV3QzvMcsdhJYaMAkL6SvJGmKmM8W_LjzCaGfvMMatnr-8Uegvd8kA%3D%3D&ppt=hp&ppn=homepage&ssid=svikub416o0000001749441153034"))
+# print(p.get_flipkart_price("https://www.flipkart.com/nothing-phone-3a/p/itm8150b2c810f5b?pid=MOBH8G3P6UXPEFSZ"))
+# print(p.get_flipkart_price(("https://www.flipkart.com/leader-beast-26t-front-suspension-disc-brake-complete-accessories-26-t-inch-mountain-cycle/p/itm23f449164291b?pid=CCEGVZ9YFTAKRXMN&lid=LSTCCEGVZ9YFTAKRXMN900VVQ&marketplace=FLIPKART&store=abc%2Fulv%2Fixt%2Fi5v&srno=b_1_1&otracker=browse&fm=organic&iid=en_2XK2mGDOdRohDNgomAGmtdO4XDCAwCWN6uWgPIRAd6QHVSzY1evuSDIPvj_X_GjLD1oLBGa0aRVO5jrsG97O5PUFjCTyOHoHZs-Z5_PS_w0%3D&ppt=None&ppn=None&ssid=jon6n666cw0000001749441977312")))
+#
+# for myntra_url in ["https://www.myntra.com/socks/heelium/heelium-men-pack-of-3-blue-solid-anti-odour-ankle-length-socks/10598478/buy",
+#             "https://www.myntra.com/sunglasses/skechers/skechers-men-blue-rectangle-sunglasses-se6035-58-91x/10216815/buy",
+#             "https://www.myntra.com/sports-accessories/kookaburra/kookaburra-men-white-rh-blaze-100-batting-leg-guards/7157062/buy",
+#             "https://www.myntra.com/accessory-gift-set/evoq/evoq-men-rust--beige-cuff-bands/16167784/buy",
+#             "https://www.myntra.com/10841992"
+#         ]:
+#     print(p.get_myntra_price(myntra_url))
